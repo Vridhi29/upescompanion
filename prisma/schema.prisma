@@ -1,0 +1,562 @@
+// UPES Academic Companion – Phase 1 schema.
+// Table/column names are snake_case in Postgres via @@map/@map.
+// Timestamps are UTC. Student-owned rows carry student_id and are protected by RLS (prisma/sql/02_rls.sql).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum DataSource {
+  synced
+  manual
+  imported
+  mock
+}
+
+enum AttendanceStatus {
+  present
+  absent
+  excused
+}
+
+enum TaskStatus {
+  new
+  pending
+  in_progress
+  completed
+  overdue
+}
+
+enum BacklogStatus {
+  pending
+  registered
+  cleared
+  directed_reading
+  not_eligible
+}
+
+enum DrStatus {
+  draft
+  submitted
+  approved
+  rejected
+  completed
+}
+
+enum SyncStatus {
+  running
+  success
+  partial
+  failed
+}
+
+enum JobStatus {
+  pending
+  running
+  done
+  failed
+  cancelled
+}
+
+enum NotificationChannel {
+  in_app
+  web_push
+  fcm
+  apns
+  email
+  sms
+  local
+  alarm
+}
+
+enum AlarmPriority {
+  normal
+  high
+  urgent
+}
+
+// ───────────────────────── Identity & academic structure ─────────────────────────
+
+/// id equals the Supabase Auth user id (auth.users.id).
+model Student {
+  id               String   @id @db.Uuid
+  email            String   @unique
+  universityId     String?  @unique @map("university_id")
+  name             String?
+  programId        String?  @map("program_id") @db.Uuid
+  department       String?
+  degree           String?
+  specialization   String?
+  batch            String?
+  currentSemester  Int?     @map("current_semester")
+  academicYear     String?  @map("academic_year")
+  timezone         String   @default("Asia/Kolkata")
+  attendanceTarget Float    @default(80) @map("attendance_target")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  program               AcademicProgram?        @relation(fields: [programId], references: [id])
+  enrollments           Enrollment[]
+  transcripts           Transcript[]
+  directedReadings      DirectedReading[]
+  backlogs              Backlog[]
+  assignments           Assignment[]
+  tasks                 AcademicTask[]
+  notifications         Notification[]
+  notificationPrefs     NotificationPreference?
+  deviceTokens          DeviceNotificationToken[]
+  syncLogs              SyncLog[]
+  auditLogs             AuditLog[]
+  attendanceSummaries   AttendanceSummary[]
+  attendanceRecords     AttendanceRecord[]
+  marks                 Mark[]
+
+  @@map("students")
+}
+
+model AcademicProgram {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  degree    String
+  duration  Int      @map("duration_semesters")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  students  Student[]
+  courses   Course[]
+  gradeRules GradeRule[]
+
+  @@unique([name, degree])
+  @@map("academic_programs")
+}
+
+model Semester {
+  id           String   @id @default(uuid()) @db.Uuid
+  academicYear String   @map("academic_year")
+  number       Int
+  startsOn     DateTime? @map("starts_on") @db.Date
+  endsOn       DateTime? @map("ends_on") @db.Date
+
+  enrollments Enrollment[]
+  exams       Exam[]
+
+  @@unique([academicYear, number])
+  @@map("semesters")
+}
+
+model Course {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique
+  name      String
+  credits   Float
+  programId String?  @map("program_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  program     AcademicProgram? @relation(fields: [programId], references: [id])
+  enrollments Enrollment[]
+  assessments Assessment[]
+  backlogs    Backlog[]
+  exams       Exam[]
+
+  @@map("courses")
+}
+
+model Enrollment {
+  id         String     @id @default(uuid()) @db.Uuid
+  studentId  String     @map("student_id") @db.Uuid
+  courseId   String     @map("course_id") @db.Uuid
+  semesterId String     @map("semester_id") @db.Uuid
+  source     DataSource @default(manual)
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  student  Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  course   Course   @relation(fields: [courseId], references: [id])
+  semester Semester @relation(fields: [semesterId], references: [id])
+  attendanceSummary AttendanceSummary?
+  attendanceRecords AttendanceRecord[]
+
+  @@unique([studentId, courseId, semesterId])
+  @@index([studentId])
+  @@map("enrollments")
+}
+
+// ───────────────────────── Attendance ─────────────────────────
+
+/// Latest reported totals per enrollment (what portals usually expose).
+model AttendanceSummary {
+  id           String     @id @default(uuid()) @db.Uuid
+  studentId    String     @map("student_id") @db.Uuid
+  enrollmentId String     @unique @map("enrollment_id") @db.Uuid
+  attended     Int
+  conducted    Int
+  asOf         DateTime   @map("as_of")
+  source       DataSource
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId])
+  @@map("attendance_summaries")
+}
+
+/// Optional per-class detail, for sources that expose it.
+model AttendanceRecord {
+  id           String           @id @default(uuid()) @db.Uuid
+  studentId    String           @map("student_id") @db.Uuid
+  enrollmentId String           @map("enrollment_id") @db.Uuid
+  classDate    DateTime         @map("class_date") @db.Date
+  status       AttendanceStatus
+  source       DataSource
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  @@unique([enrollmentId, classDate])
+  @@index([studentId])
+  @@map("attendance_records")
+}
+
+// ───────────────────────── Assessments & grades (used from Phase 3) ─────────────────────────
+
+model Assessment {
+  id         String  @id @default(uuid()) @db.Uuid
+  courseId   String  @map("course_id") @db.Uuid
+  name       String
+  type       String
+  maxMarks   Float   @map("max_marks")
+  weightage  Float
+  /// e.g. {"bestOf": 2, "outOf": 3}; null = counts as-is
+  rule       Json?
+  course     Course  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  marks      Mark[]
+
+  @@index([courseId])
+  @@map("assessments")
+}
+
+model Mark {
+  id           String     @id @default(uuid()) @db.Uuid
+  studentId    String     @map("student_id") @db.Uuid
+  assessmentId String     @map("assessment_id") @db.Uuid
+  obtained     Float
+  source       DataSource
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assessment Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, assessmentId])
+  @@map("marks")
+}
+
+/// Never invent boundaries: rows must reference a verified policy document, or be flagged unverified.
+model GradeRule {
+  id               String   @id @default(uuid()) @db.Uuid
+  programId        String?  @map("program_id") @db.Uuid
+  batch            String?
+  grade            String
+  minPercent       Float    @map("min_percent")
+  gradePoints      Float    @map("grade_points")
+  verified         Boolean  @default(false)
+  sourceDocumentId String?  @map("source_document_id") @db.Uuid
+  program          AcademicProgram? @relation(fields: [programId], references: [id])
+  sourceDocument   PolicyDocument?  @relation(fields: [sourceDocumentId], references: [id])
+
+  @@map("grade_rules")
+}
+
+model Transcript {
+  id         String     @id @default(uuid()) @db.Uuid
+  studentId  String     @map("student_id") @db.Uuid
+  semester   Int
+  sgpa       Float?
+  cgpa       Float?
+  payload    Json?
+  source     DataSource
+  createdAt  DateTime   @default(now()) @map("created_at")
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, semester])
+  @@map("transcripts")
+}
+
+// ───────────────────────── Policy knowledge base (used from Phase 6) ─────────────────────────
+
+model PolicyDocument {
+  id           String    @id @default(uuid()) @db.Uuid
+  title        String
+  category     String
+  version      String
+  batch        String?
+  effectiveFrom DateTime? @map("effective_from") @db.Date
+  supersededById String?  @map("superseded_by_id") @db.Uuid
+  officialUrl  String?   @map("official_url")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  chunks     PolicyChunk[]
+  gradeRules GradeRule[]
+  placementRules PlacementRule[]
+
+  @@unique([title, version])
+  @@map("policy_documents")
+}
+
+/// "PolicyEmbeddings" in the spec. Embedding dimension 768 (see docs/DATABASE.md); change with the provider.
+model PolicyChunk {
+  id         String  @id @default(uuid()) @db.Uuid
+  documentId String  @map("document_id") @db.Uuid
+  page       Int?
+  clause     String?
+  content    String
+  embedding  Unsupported("vector(768)")?
+
+  document PolicyDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("policy_chunks")
+}
+
+// ───────────────────────── Planning (used from Phase 7) ─────────────────────────
+
+model DirectedReading {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  courseCode String  @map("course_code")
+  facultyGuide String? @map("faculty_guide")
+  status    DrStatus @default(draft)
+  appliedOn DateTime? @map("applied_on")
+  createdAt DateTime @default(now()) @map("created_at")
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId])
+  @@map("directed_reading")
+}
+
+model Backlog {
+  id            String        @id @default(uuid()) @db.Uuid
+  studentId     String        @map("student_id") @db.Uuid
+  courseId      String        @map("course_id") @db.Uuid
+  originalSemester Int        @map("original_semester")
+  attempts      Int           @default(1)
+  status        BacklogStatus @default(pending)
+  source        DataSource    @default(manual)
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+  student       Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  course        Course        @relation(fields: [courseId], references: [id])
+
+  @@unique([studentId, courseId])
+  @@map("backlogs")
+}
+
+model Exam {
+  id         String   @id @default(uuid()) @db.Uuid
+  courseId   String   @map("course_id") @db.Uuid
+  semesterId String?  @map("semester_id") @db.Uuid
+  kind       String
+  startsAt   DateTime @map("starts_at")
+  course     Course   @relation(fields: [courseId], references: [id])
+  semester   Semester? @relation(fields: [semesterId], references: [id])
+
+  @@map("exams")
+}
+
+/// Thresholds are configurable and must cite an official document; no defaults are shipped.
+model PlacementRule {
+  id               String   @id @default(uuid()) @db.Uuid
+  company          String
+  minCgpa          Float?   @map("min_cgpa")
+  maxActiveBacklogs Int?    @map("max_active_backlogs")
+  minPercent       Float?   @map("min_percent")
+  verified         Boolean  @default(false)
+  sourceDocumentId String?  @map("source_document_id") @db.Uuid
+  sourceDocument   PolicyDocument? @relation(fields: [sourceDocumentId], references: [id])
+
+  @@map("placement_rules")
+}
+
+// ───────────────────────── Assignments, reminders, notifications (Phase 4–5) ─────────────────────────
+
+model Assignment {
+  id          String     @id @default(uuid()) @db.Uuid
+  studentId   String     @map("student_id") @db.Uuid
+  /// Id in the source system (e.g. Moodle assignment id). Prevents duplicates on re-sync.
+  externalId  String     @map("external_id")
+  title       String
+  courseCode  String?    @map("course_code")
+  description String?
+  assignedAt  DateTime?  @map("assigned_at")
+  dueAt       DateTime?  @map("due_at")
+  url         String?
+  source      DataSource
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  student Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  task    AcademicTask?
+
+  @@unique([studentId, source, externalId])
+  @@map("assignments")
+}
+
+model AcademicTask {
+  id           String     @id @default(uuid()) @db.Uuid
+  studentId    String     @map("student_id") @db.Uuid
+  assignmentId String?    @unique @map("assignment_id") @db.Uuid
+  title        String
+  status       TaskStatus @default(new)
+  dueAt        DateTime?  @map("due_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  student    Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assignment Assignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  reminders  ReminderSchedule[]
+
+  @@index([studentId, status])
+  @@map("academic_tasks")
+}
+
+model ReminderSchedule {
+  id        String              @id @default(uuid()) @db.Uuid
+  studentId String              @map("student_id") @db.Uuid
+  taskId    String              @map("task_id") @db.Uuid
+  remindAt  DateTime            @map("remind_at")
+  channel   NotificationChannel
+  enabled   Boolean             @default(true)
+  dedupeKey String              @unique @map("dedupe_key")
+  createdAt DateTime            @default(now()) @map("created_at")
+
+  task    AcademicTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  snoozes SnoozeHistory[]
+
+  @@index([studentId, remindAt])
+  @@map("reminder_schedules")
+}
+
+model SnoozeHistory {
+  id         String   @id @default(uuid()) @db.Uuid
+  studentId  String   @map("student_id") @db.Uuid
+  reminderId String   @map("reminder_id") @db.Uuid
+  snoozedUntil DateTime @map("snoozed_until")
+  createdAt  DateTime @default(now()) @map("created_at")
+  reminder   ReminderSchedule @relation(fields: [reminderId], references: [id], onDelete: Cascade)
+
+  @@map("snooze_history")
+}
+
+model AssignmentAlarm {
+  id         String        @id @default(uuid()) @db.Uuid
+  studentId  String        @map("student_id") @db.Uuid
+  taskId     String        @map("task_id") @db.Uuid
+  alarmAt    DateTime      @map("alarm_at")
+  priority   AlarmPriority @default(normal)
+  vibrate    Boolean       @default(true)
+  snoozeMinutes Int        @default(10) @map("snooze_minutes")
+  repeatCount Int          @default(1) @map("repeat_count")
+  active     Boolean       @default(true)
+  createdAt  DateTime      @default(now()) @map("created_at")
+
+  @@index([studentId, alarmAt])
+  @@map("assignment_alarms")
+}
+
+model Notification {
+  id        String              @id @default(uuid()) @db.Uuid
+  studentId String              @map("student_id") @db.Uuid
+  channel   NotificationChannel
+  title     String
+  body      String
+  dedupeKey String?             @map("dedupe_key")
+  readAt    DateTime?           @map("read_at")
+  createdAt DateTime            @default(now()) @map("created_at")
+  student   Student             @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, dedupeKey])
+  @@index([studentId, createdAt])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  studentId  String   @id @map("student_id") @db.Uuid
+  quietStart String?  @map("quiet_start")
+  quietEnd   String?  @map("quiet_end")
+  channels   Json     @default("[]")
+  reminderOffsetsMinutes Json @default("[1440,180,60]") @map("reminder_offsets_minutes")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  student    Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
+}
+
+model DeviceNotificationToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  platform  String
+  token     String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId])
+  @@map("device_notification_tokens")
+}
+
+// ───────────────────────── Operations ─────────────────────────
+
+model SyncLog {
+  id         String     @id @default(uuid()) @db.Uuid
+  studentId  String     @map("student_id") @db.Uuid
+  provider   String
+  source     DataSource
+  status     SyncStatus
+  startedAt  DateTime   @default(now()) @map("started_at")
+  finishedAt DateTime?  @map("finished_at")
+  created    Int        @default(0)
+  updated    Int        @default(0)
+  unchanged  Int        @default(0)
+  errors     Json       @default("[]")
+  student    Student    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, provider, startedAt])
+  @@map("sync_logs")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String?  @map("student_id") @db.Uuid
+  action    String
+  detail    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  student   Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
+
+  @@index([studentId, createdAt])
+  @@map("audit_logs")
+}
+
+/// Database-backed job queue (replaces Redis/Celery). Drained by pg_cron in Phase 4.
+model Job {
+  id         String    @id @default(uuid()) @db.Uuid
+  kind       String
+  payload    Json
+  runAt      DateTime  @map("run_at")
+  status     JobStatus @default(pending)
+  attempts   Int       @default(0)
+  lockedUntil DateTime? @map("locked_until")
+  /// Makes enqueueing idempotent.
+  idempotencyKey String @unique @map("idempotency_key")
+  lastError  String?   @map("last_error")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([status, runAt])
+  @@map("jobs")
+}

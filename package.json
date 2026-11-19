@@ -1,0 +1,22 @@
+{
+  "name": "upes-companion",
+  "private": true,
+  "version": "0.1.0",
+  "description": "UPES Academic Intelligence & Student Companion Portal (Phase 1 foundation)",
+  "workspaces": ["apps/*", "packages/*"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev:api": "npm run dev -w @upes/api",
+    "dev:web": "npm run dev -w @upes/web",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy"
+  },
+  "devDependencies": {
+    "prisma": "^6.2.1",
+    "typescript": "^5.6.3"
+  },
+  "prisma": { "schema": "prisma/schema.prisma" }
+}
