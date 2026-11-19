@@ -4,5 +4,5 @@
   "devCommand": "npm run dev:web",
   "installCommand": "npm ci",
   "framework": "nextjs",
-  "outputDirectory": "apps/web/.next"
+  "outputDirectory": ".next"
 }
